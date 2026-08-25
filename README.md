@@ -4,6 +4,17 @@ A tiny code‑editing agent in TypeScript (200 LOC) — a minimal, hackable CLI 
 
 This repository is for **educational purposes**, to demonstrate the core elements of a minimal CLI coding agent, adapted from [How to Build an Agent](https://ampcode.com/notes/how-to-build-an-agent) by Amp.
 
+## 修改
+为了方便使用，我稍微修改了一下teenycode的源码。
+### 支持使用其他模型（仅支持openai格式）
+参考 '概念：相关包简介.md' 或 官方文档。
+修改了创建client的代码。现在需要在根目录下的 .env 文件中提供以下环境变量：
+```
+BASE_URL=https://api.deepseek.com
+API_KEY=sk-...
+MODEL=deepseek-v4-pro
+```
+
 ## Features
 
 - Chat-based CLI that calls OpenAI and uses tool calls

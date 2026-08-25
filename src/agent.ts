@@ -12,10 +12,12 @@ import { toOpenAITools, type Tool } from "./tools.js";
 // and loops, letting the model call tools until it produces a final reply.
 export async function runAgent(tools: Tool[]): Promise<void> {
   // OpenAI SDK client reads OPENAI_API_KEY from env.
-  const client = new OpenAI();
+  const client = new OpenAI({
+    apiKey: process.env.API_KEY,
+    baseURL: process.env.BASE_URL,});
 
   // Model selection: override with OPENAI_MODEL, else use a sensible default.
-  const model = process.env.OPENAI_MODEL ?? "gpt-5";
+  const model = process.env.MODEL ?? "gpt-5";
 
   // Convert our internal Tool descriptors into OpenAI "function tools" schema.
   const toolSpecs = toOpenAITools(tools);

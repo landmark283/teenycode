@@ -26,12 +26,12 @@
   ],
   "type": "module",
   "scripts": {
-    "start": "vp node --import tsx src/index.ts",
+    "start": "node --import tsx src/index.ts",
     "prepack": "vp build",
     "prepare": "vp config"
   },
   "dependencies": {
-    "openai": "^6.34.0",
+    "openai": "^6.49.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

@@ -15,11 +15,10 @@ import { tools } from "./tools.js";
 
 loadEnvFromCurrentWorkingDirectory();
 
-// Ensure the OpenAI API key is available before starting.
-// You can also `export OPENAI_API_KEY=...` in your shell.
-if (!process.env.OPENAI_API_KEY) {
+// 需要配置使用ai的url，api_key，以及模型名称，具体见README
+if (!process.env.API_KEY) {
   console.error(
-    "OPENAI_API_KEY is not set.\n\nRun:\n  export OPENAI_API_KEY=sk-...\n  npx teenycode\n\nOr create a .env file in the current directory.\n",
+    "API_KEY is not set.\n\nRun:\n  export API_KEY=sk-...\n  npx teenycode\n\nOr create a .env file in the current directory.\n",
   );
   process.exit(1);
 }
