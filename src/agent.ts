@@ -4,6 +4,7 @@ import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { styleText } from "node:util";
 import { toOpenAITools, type Tool } from "./tools.js";
+import { promises as fs } from "node:fs";
 
 // runAgent wires together:
 // - terminal I/O via readline
@@ -14,7 +15,8 @@ export async function runAgent(tools: Tool[]): Promise<void> {
   // OpenAI SDK client reads OPENAI_API_KEY from env.
   const client = new OpenAI({
     apiKey: process.env.API_KEY,
-    baseURL: process.env.BASE_URL,});
+    baseURL: process.env.BASE_URL,
+  });
 
   // Model selection: override with OPENAI_MODEL, else use a sensible default.
   const model = process.env.MODEL ?? "gpt-5";
@@ -25,12 +27,13 @@ export async function runAgent(tools: Tool[]): Promise<void> {
   // Quick lookup table from tool name -> implementation.
   const toolByName = new Map(tools.map((t) => [t.name, t]));
 
+  //读取项目的AGENTS.md，拼接好系统提示词
+  const systemContent = await buildSystemContent();
   // Conversation state we send to the API each turn.
   const messages: ChatCompletionMessageParam[] = [
     {
       role: "system",
-      content:
-        "You are a helpful coding agent with access to tools for reading, listing, and editing files in the user's working directory. Use the tools whenever they would let you answer more accurately than guessing. Prefer reading a file over asking the user to paste its contents. When editing, make the smallest change that satisfies the request. Keep replies short.",
+      content: systemContent,
     },
   ];
 
@@ -116,4 +119,28 @@ export async function runAgent(tools: Tool[]): Promise<void> {
       }
     }
   }
+}
+
+async function buildSystemContent(): Promise<string> {
+  let systemContent =
+    "You are a helpful coding agent with access to tools for reading, listing, and editing files in the user's working directory. Use the tools whenever they would let you answer more accurately than guessing. Prefer reading a file over asking the user to paste its contents. When editing, make the smallest change that satisfies the request. Keep replies short.";
+
+  const files = ["AGENTS.md", "agents.md", "SKILL.md", "skill.md"];
+  const existingFiles = await Promise.all(
+    files.map(async (file) => {
+      try {
+        await fs.access(file);
+        return file;
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  for (const file of existingFiles.filter(Boolean)) {
+    const content = await fs.readFile(file!, "utf-8");
+    systemContent += content;
+  }
+
+  return systemContent;
 }

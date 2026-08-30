@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
+import { exec as execCallback } from "node:child_process";
+import { promisify } from "node:util";
 
 // A Tool is a capability the agent can invoke. Each tool declares:
 // - a name (used by the model to call it)
@@ -30,6 +32,7 @@ const readFile: Tool = {
     // Validate and coerce the raw input using Zod.
     const { path: p } = readFileInput.parse(input);
     // Return the file contents as UTF-8 text.
+    checkPath(p);
     return await fs.readFile(p, "utf8");
   },
 };
@@ -57,6 +60,7 @@ const listFiles: Tool = {
 
     // Default to current directory when path is not provided or is null.
     const root = pathParam && pathParam !== null ? pathParam : ".";
+    checkPath(root);
 
     // Node 20+ supports 'recursive' + 'withFileTypes' to walk a tree.
     const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
@@ -104,6 +108,7 @@ const editFile: Tool = {
       throw new Error("old_str and new_str must be different");
     }
 
+    checkPath(p);
     let content: string;
     try {
       // Try to read the file. If it does not exist and old_str === "",
@@ -141,8 +146,100 @@ const editFile: Tool = {
   },
 };
 
+const getCurrentTime_ = z.object({});
+const getCurrentTime: Tool = {
+  name: "get_current_time",
+  description:
+    "获取该计算机的当前时间。模型不知道现在是几点几分，回答时间类问题时必须调用这个工具。该时间与用户所在地的时间一致。",
+  schema: getCurrentTime_,
+  execute: async () => {
+    const now = new Date();
+    const offsetHours = -now.getTimezoneOffset() / 60; // 如中国为 +8
+    const sign = offsetHours >= 0 ? "+" : "";
+    return `${now.toLocaleString("zh-CN", { hour12: false })}（UTC${sign}${offsetHours}）`;
+  },
+};
+
+const command_white: Array<string> = ["node --version", "node --help"];
+// promisify：把"回调式"的 exec 变成"promise 式"——就能 await 了
+const exec = promisify(execCallback);
+
+const runCommandInput = z.object({
+  command: z.string().describe("要执行的 shell 命令，如 'node --version'"),
+});
+
+const runCommand: Tool = {
+  name: "run_command",
+  description:
+    "在当前工作目录执行 shell 命令并返回输出。用于运行测试、编译、查看版本等。目前只能执行以下命令：node --version, node --help",
+  schema: runCommandInput,
+  execute: async (input) => {
+    const { command } = runCommandInput.parse(input);
+    if (!command_white.includes(command)) {
+      return `ERROR: this command is not allowed.`;
+    }
+    try {
+      // timeout: 30 秒上限，防止命令卡死（呼应"轮数上限"的同一思想）
+      const { stdout, stderr } = await exec(command, { encoding: "utf8", timeout: 30000 });
+      return stdout || stderr || "(命令无输出)";
+    } catch (err) {
+      // 错误回喂！W1-D3 学的自愈在这里复用
+      return `ERROR: ${(err as Error).message}`;
+    }
+  },
+};
+
+const grepInput = z.object({
+  pattern: z.string().describe("要搜索的关键词（大小写不敏感）"),
+  path: z.string().optional().describe("要搜索的目录，默认当前目录"),
+  include: z.string().optional().describe("只搜文件名以该后缀结尾的文件，如 '.ts'"),
+  isincludesVal: z
+    .boolean()
+    .optional()
+    .describe("是否跳过依赖目录（如 node_modules ），默认跳过。"),
+});
+
+const grep: Tool = {
+  name: "grep",
+  description:
+    "按关键词在文件中搜索，返回『相对路径:行号: 该行内容』列表。用于定位代码出现的位置，如某个函数被调用了几次、某句话出现在哪些文件。pattern 是普通关键词（非正则表达式），如搜 console.log 直接写 console.log，不要写 console\\.log。默认跳过 node_modules 和 .git。",
+  schema: grepInput,
+  execute: async (input) => {
+    const { pattern, path: root = ".", include, isincludesVal = true } = grepInput.parse(input);
+    checkPath(root);
+
+    const matches: string[] = [];
+    const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
+
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      // 跳过依赖目录，否则又慢又刷屏
+      if (isincludesVal && (e.parentPath.includes("node_modules") || e.parentPath.includes(".git")))
+        continue;
+      if (include && !e.name.endsWith(include)) continue;
+
+      // full：从 cwd 出发的完整相对路径 → 用它读取
+      // display：同样从 cwd 出发（path.join 自动消掉 "."）→ 模型可直接拿去 read_file
+      const full = path.join(e.parentPath ?? root, e.name);
+      const display = full.replace(/\\/g, "/");
+
+      const lines = (await fs.readFile(full, "utf8")).split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().includes(pattern.toLowerCase())) {
+          matches.push(`${display}:${i + 1}: ${lines[i].trim()}`);
+          if (matches.length >= 50) {
+            return matches.join("\n") + "\n...(已截断，请缩小搜索范围)";
+          }
+        }
+      }
+    }
+    // 无匹配不是错误——模型需要知道"没找到"，然后换词重搜
+    return matches.length ? matches.join("\n") : "未找到匹配";
+  },
+};
+
 // Export the built-in tool list the agent will load.
-export const tools: Tool[] = [readFile, listFiles, editFile];
+export const tools: Tool[] = [readFile, listFiles, editFile, getCurrentTime, runCommand, grep];
 
 // Transform our Tool definitions into the structure the OpenAI client expects
 // for "function tools". We also convert the Zod schema to JSON Schema so the
@@ -156,4 +253,10 @@ export function toOpenAITools(tools: Tool[]) {
       parameters: z.toJSONSchema(tool.schema) as Record<string, unknown>,
     },
   }));
+}
+
+function checkPath(path: string): void {
+  if (path.includes("//") || path.includes("\\\\")) {
+    throw new Error("do not use '//' or '\\\\' in workplace path");
+  }
 }
