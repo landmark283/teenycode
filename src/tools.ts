@@ -160,7 +160,6 @@ const getCurrentTime: Tool = {
   },
 };
 
-const command_white: Array<string> = ["node --version", "node --help"];
 // promisify：把"回调式"的 exec 变成"promise 式"——就能 await 了
 const exec = promisify(execCallback);
 
@@ -171,13 +170,10 @@ const runCommandInput = z.object({
 const runCommand: Tool = {
   name: "run_command",
   description:
-    "在当前工作目录执行 shell 命令并返回输出。用于运行测试、编译、查看版本等。目前只能执行以下命令：node --version, node --help",
+    "在当前工作目录执行 shell 命令并返回输出。用于运行测试、编译、查看版本等。白名单直接放行；黑名单命令直接拒绝；其他命令会询问用户，经用户确认（y）后才执行。",
   schema: runCommandInput,
   execute: async (input) => {
     const { command } = runCommandInput.parse(input);
-    if (!command_white.includes(command)) {
-      return `ERROR: this command is not allowed.`;
-    }
     try {
       // timeout: 30 秒上限，防止命令卡死（呼应"轮数上限"的同一思想）
       const { stdout, stderr } = await exec(command, { encoding: "utf8", timeout: 30000 });
@@ -255,8 +251,16 @@ export function toOpenAITools(tools: Tool[]) {
   }));
 }
 
-function checkPath(path: string): void {
-  if (path.includes("//") || path.includes("\\\\")) {
+function checkPath(p: string): void {
+  if (p.includes("//") || p.includes("\\\\")) {
     throw new Error("do not use '//' or '\\\\' in workplace path");
+  }
+
+  // 防止越权读取/修改工作目录之外的文件（绝对路径、../ 穿越等）。
+  const resolved = path.resolve(p);
+  const cwd = path.resolve(".");
+  const rel = path.relative(cwd, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`path "${p}" escapes the working directory`);
   }
 }

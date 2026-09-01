@@ -11,14 +11,14 @@ import { promises as fs } from "node:fs";
 // - the OpenAI Chat Completions API
 // - the local tool implementations (read/list/edit files)
 // and loops, letting the model call tools until it produces a final reply.
-export async function runAgent(tools: Tool[]): Promise<void> {
-  // OpenAI SDK client reads OPENAI_API_KEY from env.
+export async function runAgent(tools: Tool[], max_tool_calling: number): Promise<void> {
+  // OpenAI SDK client reads API_KEY/BASE_URL from env (see .env.example).
   const client = new OpenAI({
     apiKey: process.env.API_KEY,
     baseURL: process.env.BASE_URL,
   });
 
-  // Model selection: override with OPENAI_MODEL, else use a sensible default.
+  // Model selection: override with MODEL, else use a sensible default.
   const model = process.env.MODEL ?? "gpt-5";
 
   // Convert our internal Tool descriptors into OpenAI "function tools" schema.
@@ -47,7 +47,21 @@ export async function runAgent(tools: Tool[]): Promise<void> {
     process.exit(0);
   });
 
+  // ---------- 权限策略（pre-execute 瀑布） ----------
+  const ALLOW_COMMANDS = ["node --version", "node --help"]; // 白名单：直接放行
+  const DENY_PREFIXES = ["rm", "del", "git push", "git reset", "format", "shutdown", "mkfs"]; // 黑名单：直接拒绝
+
+  async function checkPermission(command: string): Promise<"allow" | "deny"> {
+    if (ALLOW_COMMANDS.includes(command)) return "allow";
+    if (DENY_PREFIXES.some((p) => command.startsWith(p))) return "deny";
+    // 其余：询问用户（HITL）
+    const answer = await rl.question(
+      styleText("yellowBright", `\n[权限确认] 允许执行: ${command} ? (y/N) `),
+    );
+    return answer.trim().toLowerCase() === "y" ? "allow" : "deny";
+  }
   console.log(`Chat with ${model} (type 'exit' or 'quit' or use Ctrl-C to quit)\n`);
+  let tool_calling: number = 0;
 
   // Outer loop: read user input, then ask the model how to respond.
   while (true) {
@@ -68,6 +82,7 @@ export async function runAgent(tools: Tool[]): Promise<void> {
     // Record the user's message in the running transcript.
     messages.push({ role: "user", content: userInput });
     console.log();
+    tool_calling = 0;
 
     // Inner loop: keep calling the model until it returns plain text.
     // If the model asks to call tools, we execute them and feed results back.
@@ -85,6 +100,21 @@ export async function runAgent(tools: Tool[]): Promise<void> {
       // If there are no tool calls, we have a final answer to display.
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         console.log(`${styleText("yellowBright", "Agent")}: ${msg.content ?? ""}\n`);
+        break;
+      }
+
+      // 累计工具调用次数，超过上限则强制停止（防止模型无限循环调用工具）。
+      tool_calling += msg.tool_calls.length;
+      if (tool_calling > max_tool_calling) {
+        // 为尚未回应的 tool_call 补齐 tool 消息，避免违反 OpenAI API 约束。
+        for (const call of msg.tool_calls) {
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: "ERROR: 工具调用次数超过设置，强制停止。",
+          });
+        }
+        console.log(styleText("redBright", "tools error: 工具调用次数超过设置，强制停止。\n"));
         break;
       }
 
@@ -107,6 +137,19 @@ export async function runAgent(tools: Tool[]): Promise<void> {
 
           // Tool arguments are a JSON string — parse and validate in the tool.
           const args = JSON.parse(call.function.arguments);
+          if (tool.name === "run_command") {
+            const verdict = await checkPermission(args.command);
+            if (verdict === "deny") {
+              // 用户拒绝：只把错误回喂给模型，绝不再真正执行该命令。
+              messages.push({
+                role: "tool",
+                tool_call_id: call.id,
+                content: `ERROR: 用户拒绝了命令 "${args.command}"（权限门控）。请换一种不执行危险命令的方式，或向用户说明为什么需要它。`,
+              });
+              console.log(styleText("redBright", "用户拒绝了命令\n"));
+              continue;
+            }
+          }
           result = await tool.execute(args);
         } catch (err) {
           // Surface tool errors back to the model so it can recover.
@@ -139,7 +182,8 @@ async function buildSystemContent(): Promise<string> {
 
   for (const file of existingFiles.filter(Boolean)) {
     const content = await fs.readFile(file!, "utf-8");
-    systemContent += content;
+    // 用空行分隔，避免拼接内容粘连。
+    systemContent += `\n\n${content}`;
   }
 
   return systemContent;

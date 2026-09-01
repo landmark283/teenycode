@@ -66,11 +66,14 @@ describe("tools", () => {
   it("exposes OpenAI-compatible function tools", () => {
     const openAITools = toOpenAITools(tools);
 
-    expect(openAITools).toHaveLength(3);
+    expect(openAITools).toHaveLength(6);
     expect(openAITools.map((tool) => tool.function.name)).toEqual([
       "read_file",
       "list_files",
       "edit_file",
+      "get_current_time",
+      "run_command",
+      "grep",
     ]);
   });
 });
