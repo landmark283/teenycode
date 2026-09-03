@@ -176,7 +176,11 @@ const runCommand: Tool = {
     const { command } = runCommandInput.parse(input);
     try {
       // timeout: 30 秒上限，防止命令卡死（呼应"轮数上限"的同一思想）
-      const { stdout, stderr } = await exec(command, { encoding: "utf8", timeout: 30000 });
+      const { stdout, stderr } = await exec(command, {
+        cwd: process.env.WORKSPACE,
+        encoding: "utf8",
+        timeout: 30000,
+      });
       return stdout || stderr || "(命令无输出)";
     } catch (err) {
       // 错误回喂！W1-D3 学的自愈在这里复用

@@ -5,13 +5,17 @@ import { stdin as input, stdout as output } from "node:process";
 import { styleText } from "node:util";
 import { toOpenAITools, type Tool } from "./tools.js";
 import { promises as fs } from "node:fs";
-
+import { compact, loadSession, push } from "./context.js";
 // runAgent wires together:
 // - terminal I/O via readline
 // - the OpenAI Chat Completions API
 // - the local tool implementations (read/list/edit files)
 // and loops, letting the model call tools until it produces a final reply.
-export async function runAgent(tools: Tool[], max_tool_calling: number): Promise<void> {
+export async function runAgent(
+  tools: Tool[],
+  max_tool_calling: number,
+  sessionFile: string,
+): Promise<void> {
   // OpenAI SDK client reads API_KEY/BASE_URL from env (see .env.example).
   const client = new OpenAI({
     apiKey: process.env.API_KEY,
@@ -36,6 +40,13 @@ export async function runAgent(tools: Tool[], max_tool_calling: number): Promise
       content: systemContent,
     },
   ];
+
+  // 若 -n 指定了会话文件，恢复历史记录（追加到 system 之后）。
+  const history = await loadSession(sessionFile);
+  if (history.length > 0) {
+    messages.push(...history);
+    console.log(styleText("cyan", `已恢复 ${history.length} 条历史消息（来自 ${sessionFile}）\n`));
+  }
 
   // Interactive terminal prompt setup.
   const rl = readline.createInterface({ input, output });
@@ -79,8 +90,19 @@ export async function runAgent(tools: Tool[], max_tool_calling: number): Promise
       continue;
     }
 
+    if (userInput.trim() === "/compact") {
+      await compact(messages, client, model);
+      console.log("上下文压缩完毕\n");
+      continue;
+    }
+    if (userInput.trim() === "/compact --show") {
+      await compact(messages, client, model);
+      console.log("上下文压缩完毕\n", messages);
+      continue;
+    }
+
     // Record the user's message in the running transcript.
-    messages.push({ role: "user", content: userInput });
+    await push(messages, { role: "user", content: userInput }, sessionFile);
     console.log();
     tool_calling = 0;
 
@@ -95,7 +117,7 @@ export async function runAgent(tools: Tool[], max_tool_calling: number): Promise
       const msg = res.choices[0].message;
 
       // Save assistant message (either text or tool calls) to history.
-      messages.push(msg);
+      await push(messages, msg, sessionFile);
 
       // If there are no tool calls, we have a final answer to display.
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
@@ -108,11 +130,15 @@ export async function runAgent(tools: Tool[], max_tool_calling: number): Promise
       if (tool_calling > max_tool_calling) {
         // 为尚未回应的 tool_call 补齐 tool 消息，避免违反 OpenAI API 约束。
         for (const call of msg.tool_calls) {
-          messages.push({
-            role: "tool",
-            tool_call_id: call.id,
-            content: "ERROR: 工具调用次数超过设置，强制停止。",
-          });
+          await push(
+            messages,
+            {
+              role: "tool",
+              tool_call_id: call.id,
+              content: "ERROR: 工具调用次数超过设置，强制停止。",
+            },
+            sessionFile,
+          );
         }
         console.log(styleText("redBright", "tools error: 工具调用次数超过设置，强制停止。\n"));
         break;
@@ -141,11 +167,15 @@ export async function runAgent(tools: Tool[], max_tool_calling: number): Promise
             const verdict = await checkPermission(args.command);
             if (verdict === "deny") {
               // 用户拒绝：只把错误回喂给模型，绝不再真正执行该命令。
-              messages.push({
-                role: "tool",
-                tool_call_id: call.id,
-                content: `ERROR: 用户拒绝了命令 "${args.command}"（权限门控）。请换一种不执行危险命令的方式，或向用户说明为什么需要它。`,
-              });
+              await push(
+                messages,
+                {
+                  role: "tool",
+                  tool_call_id: call.id,
+                  content: `ERROR: 用户拒绝了命令 "${args.command}"（权限门控）。请换一种不执行危险命令的方式，或向用户说明为什么需要它。`,
+                },
+                sessionFile,
+              );
               console.log(styleText("redBright", "用户拒绝了命令\n"));
               continue;
             }
@@ -158,7 +188,7 @@ export async function runAgent(tools: Tool[], max_tool_calling: number): Promise
         }
 
         // Provide the tool's output to the model using the tool_call_id.
-        messages.push({ role: "tool", tool_call_id: call.id, content: result });
+        await push(messages, { role: "tool", tool_call_id: call.id, content: result }, sessionFile);
       }
     }
   }

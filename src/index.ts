@@ -22,6 +22,13 @@ if (!process.env.API_KEY) {
   );
   process.exit(1);
 }
+
+if (!process.env.WORKSPACE) {
+  console.error(
+    "WORKSPACE is not set.\n\nRun:\n  export WORKSPACE=C:/.....\n  npx teenycode\n\nOr create a .env file in the current directory.\n",
+  );
+  process.exit(1);
+}
 let maxToolCalling: number = 64;
 if (process.env.MAX_TOOL_CALLING) {
   const parsedMax = Number(process.env.MAX_TOOL_CALLING);
@@ -30,9 +37,23 @@ if (process.env.MAX_TOOL_CALLING) {
   }
 }
 
+// -n <文件名>：指定会话日志文件名（记录新消息 + 启动时恢复该日志）
+let sessionFile: string = "";
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === "-n") {
+    sessionFile = argv[i + 1] ?? "";
+    if (!sessionFile) {
+      console.error("-n 需要一个文件名参数，如: node --import tsx src/index.ts -n session1");
+      process.exit(1);
+    }
+    i++; // 跳过参数值
+  }
+}
+
 // Boot the agent with our toolset. Any unhandled errors are logged and we exit
 // with a non-zero code so shells/CI can detect failure.
-runAgent(tools, maxToolCalling).catch((err) => {
+runAgent(tools, maxToolCalling, sessionFile).catch((err) => {
   console.error(err);
   console.error(); // extra newline for readability
   process.exit(1);
