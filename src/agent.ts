@@ -5,7 +5,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { styleText } from "node:util";
 import { toOpenAITools, type Tool } from "./tools.js";
 import { promises as fs } from "node:fs";
-import { compact, loadSession, push } from "./context.js";
+import { compact, loadSession, push, estimateTokens } from "./context.js";
 // runAgent wires together:
 // - terminal I/O via readline
 // - the OpenAI Chat Completions API
@@ -15,6 +15,8 @@ export async function runAgent(
   tools: Tool[],
   max_tool_calling: number,
   sessionFile: string,
+  max_tokens: number,
+  keep_turns: number,
 ): Promise<void> {
   // OpenAI SDK client reads API_KEY/BASE_URL from env (see .env.example).
   const client = new OpenAI({
@@ -76,6 +78,12 @@ export async function runAgent(
 
   // Outer loop: read user input, then ask the model how to respond.
   while (true) {
+    //自动压缩上下文
+    if (estimateTokens(messages) > max_tokens) {
+      console.log(`上下文token超过了${max_tokens}，进行上下文压缩...\n`);
+      await compact(messages, client, model, keep_turns, sessionFile);
+      console.log("上下文压缩完成！\n");
+    }
     const userInput = await rl.question(`${styleText("blueBright", "You")}: `);
 
     // Exit shortcuts: "exit", "quit", vi-style ":q", or Ctrl-D (\u0004).
@@ -90,13 +98,17 @@ export async function runAgent(
       continue;
     }
 
+    if (userInput.trim() === "/refresh") {
+      console.log("\n", messages);
+      continue;
+    }
     if (userInput.trim() === "/compact") {
-      await compact(messages, client, model);
+      await compact(messages, client, model, keep_turns, sessionFile);
       console.log("上下文压缩完毕\n");
       continue;
     }
     if (userInput.trim() === "/compact --show") {
-      await compact(messages, client, model);
+      await compact(messages, client, model, keep_turns, sessionFile);
       console.log("上下文压缩完毕\n", messages);
       continue;
     }

@@ -37,6 +37,20 @@ if (process.env.MAX_TOOL_CALLING) {
   }
 }
 
+let MAX_TOKENS: number = 64;
+if (process.env.MAX_TOKENS) {
+  const temp = Number(process.env.MAX_TOKENS);
+  if (Number.isFinite(temp) && temp > 0) {
+    MAX_TOKENS = temp;
+  }
+}
+let KEEP_TURNS: number = 64;
+if (process.env.KEEP_TURNS) {
+  const temp = Number(process.env.KEEP_TURNS);
+  if (Number.isFinite(temp) && temp > 0) {
+    KEEP_TURNS = temp;
+  }
+}
 // -n <文件名>：指定会话日志文件名（记录新消息 + 启动时恢复该日志）
 let sessionFile: string = "";
 const argv = process.argv.slice(2);
@@ -53,7 +67,7 @@ for (let i = 0; i < argv.length; i++) {
 
 // Boot the agent with our toolset. Any unhandled errors are logged and we exit
 // with a non-zero code so shells/CI can detect failure.
-runAgent(tools, maxToolCalling, sessionFile).catch((err) => {
+runAgent(tools, maxToolCalling, sessionFile, MAX_TOKENS, KEEP_TURNS).catch((err) => {
   console.error(err);
   console.error(); // extra newline for readability
   process.exit(1);
