@@ -238,8 +238,124 @@ const grep: Tool = {
   },
 };
 
+// -------------------------
+// web_search implementation
+// -------------------------
+// DeepSeek 官方没有独立的"搜索端点"，但它提供 Anthropic 兼容的 Messages API，
+// 且在该接口上原生支持 web_search_20250305 这个 server tool：
+// 我们发一次模型调用，DeepSeek 在服务端完成联网搜索，返回结构化的
+// web_search_tool_result 块（url/title/page_age），snippet 摘要则来自 text
+// block 的 citations（url -> cited_text）。一次搜索 = 一次完整模型调用
+// （延迟 + token 代价），但不需要任何第三方搜索 API key。
+const webSearchInput = z.object({
+  query: z.string().describe("要搜索的问题或关键词，如 'DeepSeek 最新模型'"),
+});
+
+// 独立于 BASE_URL：搜索走 Anthropic 兼容端点（/anthropic/v1），
+// 与 chat-completions 的 BASE_URL 是两套 base，不能混用。
+const SEARCH_BASE_URL = process.env.SEARCH_BASE_URL ?? "https://api.deepseek.com/anthropic/v1";
+const SEARCH_MODEL = process.env.SEARCH_MODEL ?? process.env.MODEL ?? "deepseek-chat";
+
+// Anthropic Messages 响应的内容块（只声明我们用到的字段）。
+type ContentBlock = {
+  type?: string;
+  content?: Array<{
+    type?: string;
+    url?: string;
+    title?: string;
+    page_age?: string;
+  }>;
+  citations?: Array<{ url?: string; cited_text?: string }>;
+};
+
+const webSearch: Tool = {
+  name: "web_search",
+  description:
+    "联网搜索并返回结果列表（标题+链接+摘要）。模型知识有截止日期，回答需要实时信息、最新新闻、他人经验、当前市场/技术动态时，必须先用这个工具搜索，不要凭记忆编造。",
+  schema: webSearchInput,
+  execute: async (input) => {
+    const { query } = webSearchInput.parse(input);
+
+    // 1. 发一次 Messages 调用，携带原生 web_search server tool（服务端完成搜索）。
+    let res: Response;
+    try {
+      res = await fetch(`${SEARCH_BASE_URL}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": process.env.API_KEY ?? "",
+          "authorization": `Bearer ${process.env.API_KEY ?? ""}`,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: SEARCH_MODEL,
+          max_tokens: 4096,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: `Perform a web search for the query: ${query}` }],
+            },
+          ],
+          tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+        }),
+      });
+    } catch (err) {
+      return `ERROR: 网络请求失败: ${(err as Error).message}`;
+    }
+
+    if (!res.ok) {
+      // 把 API 报错原文回喂给模型，让它自己判断（错误回喂/自愈）。
+      const body = await res.text().catch(() => "");
+      return `ERROR: 搜索 API 返回 HTTP ${res.status}: ${body.slice(0, 500)}`;
+    }
+
+    // 2. 解析 Anthropic 响应：web_search_tool_result 块里是结果条目，
+    //    text block 的 citations 里是 url -> 摘要 的映射（snippet 的来源）。
+    let data: { content?: ContentBlock[] };
+    try {
+      data = (await res.json()) as { content?: ContentBlock[] };
+    } catch (err) {
+      return `ERROR: 解析搜索响应失败: ${(err as Error).message}`;
+    }
+
+    const blocks = data.content ?? [];
+    const resultBlocks = blocks.filter((b) => b.type === "web_search_tool_result");
+    if (resultBlocks.length === 0) {
+      return "ERROR: 搜索未返回结果块（可能没触发原生搜索），请换一种问法重试。";
+    }
+
+    // 3. 汇总所有 result 条目 + 拼接 snippet，去重后拼成紧凑文本。
+    const snippets = new Map<string, string>();
+    for (const block of blocks) {
+      for (const cite of block.citations ?? []) {
+        if (cite.url && cite.cited_text && !snippets.has(cite.url)) {
+          snippets.set(cite.url, cite.cited_text);
+        }
+      }
+    }
+
+    const seen = new Set<string>();
+    const lines: string[] = [];
+    for (const block of resultBlocks) {
+      for (const item of block.content ?? []) {
+        if (item.type !== "web_search_result" || !item.url || seen.has(item.url)) continue;
+        seen.add(item.url);
+        const snippet = snippets.get(item.url);
+        lines.push(
+          `- ${item.title ?? item.url}\n  ${item.url}${item.page_age ? ` (${item.page_age})` : ""}` +
+            (snippet ? `\n  ${snippet}` : ""),
+        );
+        if (lines.length >= 8) break; // 截断：避免结果太多烧上下文（对应上下文工程）
+      }
+      if (lines.length >= 8) break;
+    }
+
+    return lines.length > 0 ? lines.join("\n") : "搜索完成但没有找到结果";
+  },
+};
+
 // Export the built-in tool list the agent will load.
-export const tools: Tool[] = [readFile, listFiles, editFile, getCurrentTime, runCommand, grep];
+export const tools: Tool[] = [readFile, listFiles, editFile, getCurrentTime, runCommand, grep, webSearch];
 
 // Transform our Tool definitions into the structure the OpenAI client expects
 // for "function tools". We also convert the Zod schema to JSON Schema so the
